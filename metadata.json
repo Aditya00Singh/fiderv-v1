@@ -1,0 +1,6 @@
+{
+  "name": "AERO P2P — High-Speed Direct File Transfer",
+  "description": "Minimalist, zero-server direct browser-to-browser file transfer over high-speed multi-channel WebRTC data streams.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
