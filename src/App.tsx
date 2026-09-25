@@ -9,6 +9,7 @@ import { ConnectionStatusBanner } from './components/ConnectionStatusBanner';
 import { SignalingClient, SignalingMessage } from './lib/signaling';
 import { P2PTransferEngine } from './lib/webrtc';
 import { ConnectionState, FileMetadata, TransferProgress as TransferProgressType, ReceivedFileItem, ChannelStat } from './types/transfer';
+import { sound } from './lib/sound';
 import { Inbox, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
@@ -58,6 +59,9 @@ export default function App() {
     const engine = new P2PTransferEngine({
       onConnectionStateChange: (state) => {
         setConnectionState(state);
+        if (state === 'failed') {
+          sound.playError();
+        }
       },
       onSignal: (signal) => {
         signalingRef.current?.sendSignal(signal);

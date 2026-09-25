@@ -1,7 +1,27 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { TransferProgress as TransferProgressType, ChannelStat } from '../types/transfer';
 import { formatBytes } from '../lib/format';
-import { Zap, ShieldCheck, XCircle, Activity, Clock } from 'lucide-react';
+import { sound } from '../lib/sound';
+import {
+  Zap,
+  ShieldCheck,
+  XCircle,
+  Activity,
+  Clock,
+  Volume2,
+  VolumeX,
+  TrendingDown,
+  Gauge,
+} from 'lucide-react';
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ReferenceLine,
+} from 'recharts';
 
 interface TransferProgressProps {
   progress: TransferProgressType | null;
@@ -9,6 +29,13 @@ interface TransferProgressProps {
   onCancel?: () => void;
   fileName?: string;
   isReceiving?: boolean;
+}
+
+interface ThroughputPoint {
+  time: string;
+  speedMBps: number;
+  isCongested: boolean;
+  bufferedKB: number;
 }
 
 export function TransferProgress({
@@ -22,10 +49,50 @@ export function TransferProgress({
   const [realtimeSpeedMBps, setRealtimeSpeedMBps] = useState<number>(0);
   const [peakSpeedMBps, setPeakSpeedMBps] = useState<number>(0);
   const [smoothedEtaSeconds, setSmoothedEtaSeconds] = useState<number | null>(null);
+  const [isAudioMuted, setIsAudioMuted] = useState<boolean>(() => sound.getMuted());
+
+  // Rolling throughput history for the recharts mini-chart
+  const [throughputHistory, setThroughputHistory] = useState<ThroughputPoint[]>(() => {
+    // Initial placeholder baseline points
+    return Array.from({ length: 12 }, (_, i) => ({
+      time: `-${12 - i}s`,
+      speedMBps: 0,
+      isCongested: false,
+      bufferedKB: 0,
+    }));
+  });
 
   // Tracking refs to compute byte throughput delta over time
   const lastSampleRef = useRef<{ bytes: number; timestamp: number } | null>(null);
   const speedHistoryRef = useRef<number[]>([]);
+  const previousStatusRef = useRef<string | null>(null);
+  const lastChartPointTimeRef = useRef<number>(0);
+
+  // Toggle sound preferences
+  const handleToggleSound = () => {
+    const next = !isAudioMuted;
+    setIsAudioMuted(next);
+    sound.setMuted(next);
+  };
+
+  // Trigger audio beeps on lifecycle status transitions (Start, Complete, Error)
+  useEffect(() => {
+    if (!progress) return;
+
+    const currentStatus = progress.status;
+    const prevStatus = previousStatusRef.current;
+
+    if (prevStatus !== currentStatus) {
+      if (currentStatus === 'transferring' && prevStatus !== 'transferring') {
+        sound.playStart();
+      } else if (currentStatus === 'completed' && prevStatus !== 'completed') {
+        sound.playComplete();
+      } else if (currentStatus === 'error' && prevStatus !== 'error') {
+        sound.playError();
+      }
+      previousStatusRef.current = currentStatus;
+    }
+  }, [progress?.status]);
 
   // Reset or initialize tracking when progress starts or file changes
   useEffect(() => {
@@ -35,6 +102,7 @@ export function TransferProgress({
       setRealtimeSpeedMBps(0);
       setPeakSpeedMBps(0);
       setSmoothedEtaSeconds(null);
+      previousStatusRef.current = null;
       return;
     }
 
@@ -76,6 +144,11 @@ export function TransferProgress({
     }
   }, [progress?.bytesTransferred, progress?.speedBps]);
 
+  // Total buffer accumulation across active WebRTC channels for backpressure detection
+  const totalBufferedAmount = useMemo(() => {
+    return channelStats.reduce((acc, ch) => acc + (ch.bufferedAmount || 0), 0);
+  }, [channelStats]);
+
   // Fallback to progress.speedBps if local calculation is 0 but engine reported speed
   const effectiveSpeedMBps = useMemo(() => {
     if (realtimeSpeedMBps > 0) return realtimeSpeedMBps;
@@ -91,7 +164,41 @@ export function TransferProgress({
     return Math.max(0, (progress.totalBytes || 0) - (progress.bytesTransferred || 0));
   }, [progress?.totalBytes, progress?.bytesTransferred]);
 
-  // Calculate real-time estimated time remaining based on active transfer speed and byte throughput
+  // Record real-time chart data points periodically (every ~400ms)
+  useEffect(() => {
+    if (!progress || progress.status !== 'transferring') return;
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      if (now - lastChartPointTimeRef.current < 350) return;
+      lastChartPointTimeRef.current = now;
+
+      const date = new Date(now);
+      const timeStr = date.toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' });
+      const currentBufferedKB = Math.round(totalBufferedAmount / 1024);
+
+      // Congestion is flagged when buffer is high (> 256KB) or throughput severely drops (< 0.5 MB/s)
+      const isCongested = currentBufferedKB > 256 || (effectiveSpeedMBps < 0.5 && progress.bytesTransferred > 0);
+
+      setThroughputHistory((prev) => {
+        const next = [...prev, {
+          time: timeStr,
+          speedMBps: Number(effectiveSpeedMBps.toFixed(2)),
+          isCongested,
+          bufferedKB: currentBufferedKB,
+        }];
+        // Keep max 24 rolling points
+        if (next.length > 24) {
+          return next.slice(next.length - 24);
+        }
+        return next;
+      });
+    }, 400);
+
+    return () => clearInterval(interval);
+  }, [progress, effectiveSpeedMBps, totalBufferedAmount]);
+
+  // Calculate real-time estimated time remaining based on active transfer speed
   useEffect(() => {
     if (!progress) {
       setSmoothedEtaSeconds(null);
@@ -108,7 +215,6 @@ export function TransferProgress({
       return;
     }
 
-    // Determine current speed in bytes per second
     const currentSpeedBps = effectiveSpeedMBps > 0
       ? effectiveSpeedMBps * 1024 * 1024
       : (progress.speedBps || 0);
@@ -119,8 +225,6 @@ export function TransferProgress({
 
       setSmoothedEtaSeconds((prev) => {
         if (prev === null) return roundedEta;
-        // Exponential damping to prevent erratic ETA bouncing during network micro-bursts
-        // (70% previous + 30% new sample)
         const smoothed = Math.round(prev * 0.7 + roundedEta * 0.3);
         return Math.max(0, smoothed);
       });
@@ -168,14 +272,14 @@ export function TransferProgress({
     return completionDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }, [progress?.status, smoothedEtaSeconds]);
 
-  // Total buffer accumulation across active WebRTC channels for backpressure detection
-  const totalBufferedAmount = useMemo(() => {
-    return channelStats.reduce((acc, ch) => acc + (ch.bufferedAmount || 0), 0);
-  }, [channelStats]);
+  // Current stream congestion detection
+  const isCurrentlyCongested = useMemo(() => {
+    return totalBufferedAmount > 256 * 1024 || (progress?.status === 'transferring' && effectiveSpeedMBps < 0.4);
+  }, [totalBufferedAmount, progress?.status, effectiveSpeedMBps]);
 
   // WebRTC Stream Health Evaluation
   const streamHealth = useMemo(() => {
-    if (!progress) return { status: 'idle', label: 'Idle', color: 'neutral', description: 'Waiting for stream' };
+    if (!progress) return { status: 'idle', label: 'Idle', sublabel: 'Waiting for stream', color: 'neutral', badgeBg: '', pulseClass: '' };
 
     if (progress.status === 'completed') {
       return {
@@ -247,7 +351,7 @@ export function TransferProgress({
     return {
       status: 'congested',
       label: 'Constrained Stream',
-      sublabel: totalBufferedAmount > 512 * 1024 ? 'High buffer backpressure / network throttling' : 'Initializing packet flow',
+      sublabel: totalBufferedAmount > 512 * 1024 ? 'High buffer backpressure / network throttling' : 'Buffer throttled or starting up',
       color: 'amber',
       badgeBg: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
       pulseClass: 'bg-amber-400 animate-ping',
@@ -260,7 +364,7 @@ export function TransferProgress({
 
   return (
     <div className="w-full max-w-2xl mx-auto my-6 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl p-6 shadow-sm transition-colors">
-      {/* Top Header: Stream Type & Action */}
+      {/* Top Header: Stream Type & Controls */}
       <div className="flex items-center justify-between mb-4">
         <div>
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-400">
@@ -272,20 +376,37 @@ export function TransferProgress({
           </h4>
         </div>
 
-        {onCancel && progress.status === 'transferring' && (
+        <div className="flex items-center gap-2">
+          {/* Sound Notification Accessibility Toggle */}
           <button
             type="button"
-            onClick={onCancel}
-            className="flex items-center gap-1.5 text-xs text-neutral-400 hover:text-red-500 transition-colors p-1.5 rounded-lg hover:bg-red-500/10 cursor-pointer"
+            onClick={handleToggleSound}
+            className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+              isAudioMuted
+                ? 'border-neutral-200 dark:border-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200'
+                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+            }`}
+            title={isAudioMuted ? 'Unmute transfer audio cues' : 'Mute transfer audio cues'}
+            aria-label={isAudioMuted ? 'Unmute transfer beeps' : 'Mute transfer beeps'}
           >
-            <XCircle className="w-4 h-4" />
-            <span>Cancel</span>
+            {isAudioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
-        )}
+
+          {onCancel && progress.status === 'transferring' && (
+            <button
+              type="button"
+              onClick={onCancel}
+              className="flex items-center gap-1.5 text-xs text-neutral-400 hover:text-red-500 transition-colors p-1.5 rounded-lg hover:bg-red-500/10 cursor-pointer"
+            >
+              <XCircle className="w-4 h-4" />
+              <span>Cancel</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* WebRTC Stream Health Banner */}
-      <div className="mb-5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border bg-neutral-50 dark:bg-neutral-800/40 border-neutral-200 dark:border-neutral-800">
+      <div className="mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border bg-neutral-50 dark:bg-neutral-800/40 border-neutral-200 dark:border-neutral-800">
         <div className="flex items-center gap-2.5">
           <div className="relative flex h-2.5 w-2.5">
             <span className={`absolute inline-flex h-full w-full rounded-full opacity-75 ${streamHealth.pulseClass}`} />
@@ -299,6 +420,12 @@ export function TransferProgress({
               <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${streamHealth.badgeBg}`}>
                 {effectiveSpeedMBps.toFixed(2)} MB/s
               </span>
+              {isCurrentlyCongested && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400">
+                  <TrendingDown className="w-2.5 h-2.5" />
+                  Congestion Detected
+                </span>
+              )}
             </div>
             <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5">
               {streamHealth.sublabel}
@@ -317,6 +444,98 @@ export function TransferProgress({
             <Activity className="w-3.5 h-3.5 text-neutral-500" />
             <span>Peak: {peakSpeedMBps.toFixed(1)} MB/s</span>
           </div>
+        </div>
+      </div>
+
+      {/* Real-time Recharts Throughput Fluctuations Mini-Chart */}
+      <div className="mb-5 p-3 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-neutral-50/70 dark:bg-neutral-950/40">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold tracking-wider text-neutral-500 uppercase">
+            <Gauge className="w-3.5 h-3.5 text-neutral-700 dark:text-neutral-300" />
+            <span>Throughput Oscilloscope (MB/s)</span>
+          </div>
+          <div className="flex items-center gap-3 text-[10px] font-mono text-neutral-400">
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              Optimal
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-amber-500" />
+              Congested (&lt; 0.5 MB/s)
+            </span>
+          </div>
+        </div>
+
+        <div className="h-20 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={throughputHistory} margin={{ top: 4, right: 0, left: -24, bottom: 0 }}>
+              <defs>
+                <linearGradient id="speedGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop
+                    offset="5%"
+                    stopColor={isCurrentlyCongested ? '#f59e0b' : '#10b981'}
+                    stopOpacity={0.4}
+                  />
+                  <stop
+                    offset="95%"
+                    stopColor={isCurrentlyCongested ? '#f59e0b' : '#10b981'}
+                    stopOpacity={0.0}
+                  />
+                </linearGradient>
+              </defs>
+
+              <XAxis
+                dataKey="time"
+                hide
+              />
+              <YAxis
+                domain={[0, (dataMax: number) => Math.max(2, Math.ceil(dataMax * 1.2))]}
+                axisLine={false}
+                tickLine={false}
+                tick={{ fontSize: 9, fill: '#888' }}
+                tickFormatter={(val) => `${val}`}
+              />
+
+              {/* Congestion threshold reference line */}
+              <ReferenceLine
+                y={0.5}
+                stroke="#f59e0b"
+                strokeDasharray="3 3"
+                strokeOpacity={0.5}
+              />
+
+              <Tooltip
+                content={({ active, payload }) => {
+                  if (active && payload && payload.length) {
+                    const data = payload[0].payload as ThroughputPoint;
+                    return (
+                      <div className="bg-neutral-900 text-white text-[10px] font-mono px-2 py-1 rounded shadow-md border border-neutral-700">
+                        <div className="font-bold">{data.speedMBps.toFixed(2)} MB/s</div>
+                        <div className="text-neutral-400 text-[9px]">{data.time}</div>
+                        {data.bufferedKB > 0 && (
+                          <div className="text-amber-400 text-[9px]">Buffer: {data.bufferedKB} KB</div>
+                        )}
+                        {data.isCongested && (
+                          <div className="text-rose-400 text-[9px] font-semibold">Congestion Alert</div>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
+                }}
+              />
+
+              <Area
+                type="monotone"
+                dataKey="speedMBps"
+                stroke={isCurrentlyCongested ? '#f59e0b' : '#10b981'}
+                strokeWidth={2}
+                fillOpacity={1}
+                fill="url(#speedGradient)"
+                isAnimationActive={false}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
       </div>
 
