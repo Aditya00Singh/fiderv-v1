@@ -125,11 +125,10 @@ export default function App() {
           const engine = getOrCreateEngine();
           const iceServers = await fetchIceServers();
           // The peer who receives initiator=true initiates the WebRTC offer
-          if (msg.payload?.initiator || msg.payload === undefined) {
-            engine.initializeConnection(true, iceServers);
-          } else {
-            engine.initializeConnection(false, iceServers);
-          }
+          const isInitiator = msg.initiator !== undefined 
+            ? Boolean(msg.initiator) 
+            : Boolean(msg.payload?.initiator);
+          engine.initializeConnection(isInitiator, iceServers);
           break;
         }
 
@@ -286,7 +285,7 @@ export default function App() {
         )}
 
         {/* Transfer Progress and Metrics */}
-        {(transferProgress || isSending) && (
+        {(transferProgress || isSending || incomingManifest.length > 0) && (
           <TransferProgress
             progress={transferProgress}
             channelStats={channelStats}

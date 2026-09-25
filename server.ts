@@ -118,14 +118,16 @@ app.post('/api/signaling/join', (req, res) => {
       queueHttpMessage(code, existingPeerId, {
         type: 'peer_joined',
         peerId: assignedPeerId,
-        initiator: false,
+        initiator: true,
+        payload: { initiator: true, peerId: assignedPeerId },
         timestamp: Date.now()
       });
       // Notify the joiner about the existing peer
       queueHttpMessage(code, assignedPeerId, {
         type: 'peer_joined',
         peerId: existingPeerId,
-        initiator: true,
+        initiator: false,
+        payload: { initiator: false, peerId: existingPeerId },
         timestamp: Date.now()
       });
     }
@@ -320,16 +322,19 @@ wss.on('connection', (ws: PeerSocket) => {
           // Notify existing peers in room that a new peer joined
           peerSet.forEach((client) => {
             if (client !== ws && client.readyState === WebSocket.OPEN) {
+              // Existing peer acts as initiator
               client.send(JSON.stringify({
                 type: 'peer_joined',
                 peerId: ws.peerId,
-                initiator: false // The existing peer should initiate WebRTC offer
+                initiator: true,
+                payload: { initiator: true, peerId: ws.peerId }
               }));
-              // Also notify the joining peer about this existing peer
+              // Joining peer acts as responder
               ws.send(JSON.stringify({
                 type: 'peer_joined',
                 peerId: client.peerId,
-                initiator: true // The joiner acts as initiator or responder
+                initiator: false,
+                payload: { initiator: false, peerId: client.peerId }
               }));
             }
           });

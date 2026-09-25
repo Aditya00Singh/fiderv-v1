@@ -3,6 +3,7 @@ export interface SignalingMessage {
   roomId?: string;
   peerId?: string;
   fromPeerId?: string;
+  initiator?: boolean;
   payload?: any;
 }
 

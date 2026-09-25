@@ -12,9 +12,10 @@ export function Header({ onResetSession, isConnected }: HeaderProps) {
       <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
         <a
           href="/"
-          className="text-lg font-bold tracking-tight text-neutral-900 dark:text-neutral-100 font-display transition-colors select-none"
+          className="text-lg font-bold tracking-tight text-neutral-900 dark:text-neutral-100 font-display transition-colors select-none flex items-center gap-1.5"
         >
-          AERO<span className="text-neutral-400 dark:text-neutral-600 font-normal ml-1">P2P</span>
+          <span>fiederv</span>
+          <span className="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-neutral-100 inline-block" />
         </a>
 
         <div className="flex items-center gap-2">
